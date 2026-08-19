@@ -54,10 +54,35 @@ jobs:
           remote_user: ${{ secrets.SSH_USERNAME }}
           remote_key: ${{ secrets.SSH_PRIVATE_KEY }}
 
-      # public_html を app/public へのリンクにし、取り込みまで実行する。
-      # public_html が実体のディレクトリだった場合は、中に別のものが
-      # 入っている可能性があるので、消さずに中断する。
-      - name: Link public_html, migrate and seed
+      # 置き場所の用意と、取り込みを分けておく。
+      # まとめて1つのステップにすると、失敗したときにどこで転んだのか
+      # ステップの成否からは分からない。
+      - name: Prepare directories and public_html link
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          port: 10022
+          username: ${{ secrets.SSH_USERNAME }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          script: |
+            set -ex
+            cd /home/xs501620/47meshi.net
+            mkdir -p app/database app/storage/framework/cache app/storage/framework/sessions app/storage/framework/views app/storage/logs app/storage/app
+            touch app/database/database.sqlite
+            chmod -R 775 app/storage app/database
+
+            # public_html が実体のディレクトリなら、中に別のものが入っている
+            # 可能性があるので消さずに中断する。
+            if [ -e public_html ] && [ ! -L public_html ]; then
+              echo "public_html がシンボリックリンクではありません。中断します。" >&2
+              exit 1
+            fi
+
+            if [ ! -L public_html ]; then
+              ln -s app/public public_html
+            fi
+
+      - name: Migrate and seed
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: ${{ secrets.SSH_HOST }}
@@ -66,30 +91,13 @@ jobs:
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           command_timeout: 20m
           script: |
-            set -e
-            cd /home/xs501620/47meshi.net
-            mkdir -p app/database app/storage/framework/cache app/storage/framework/sessions app/storage/framework/views app/storage/logs app/storage/app
-            touch app/database/database.sqlite
-            chmod -R 775 app/storage app/database
-
-            if [ -e public_html ] && [ ! -L public_html ]; then
-              echo "public_html がシンボリックリンクではありません。中身を消す恐れがあるため中断します。" >&2
-              ls -la public_html | head -20 >&2
-              exit 1
-            fi
-
-            if [ ! -L public_html ]; then
-              ln -s app/public public_html
-            fi
-
-            cd app
+            set -ex
+            cd /home/xs501620/47meshi.net/app
             PHP=$(command -v php8.3 || command -v php || echo /opt/php-8.3.30/bin/php)
-            echo "php: $PHP ($($PHP -v | head -1))"
+            $PHP -v | head -1
             $PHP artisan config:clear
             $PHP artisan route:clear
             $PHP artisan view:clear
             $PHP artisan cache:clear
             $PHP artisan migrate --force
             $PHP -d memory_limit=512M artisan db:seed --class=DishSeeder --force
-            echo "--- 取り込み後の件数 ---"
-            $PHP artisan tinker --execute="echo \App\Models\Dish::count();"
