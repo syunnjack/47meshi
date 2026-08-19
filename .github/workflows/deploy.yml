@@ -1,0 +1,95 @@
+name: Deploy to Xserver
+
+# 公開先は 47meshi.net。
+# サーバ上の配置は他サイトと同じで、public_html が app/public への
+# シンボリックリンク、Laravel 本体は <ドメイン>/app/ に置く。
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          tools: composer
+          extensions: sqlite3, pdo_sqlite
+
+      - name: Install PHP dependencies
+        run: composer install --no-dev --optimize-autoloader --no-interaction
+
+      - name: Write production .env
+        run: |
+          cat > .env <<EOF
+          APP_NAME="47めし"
+          APP_ENV=production
+          APP_KEY=${{ secrets.APP_KEY }}
+          APP_DEBUG=false
+          APP_URL=https://47meshi.net
+          APP_LOCALE=ja
+          APP_FALLBACK_LOCALE=ja
+          DB_CONNECTION=sqlite
+          LOG_CHANNEL=stack
+          LOG_LEVEL=error
+          CACHE_STORE=file
+          SESSION_DRIVER=file
+          QUEUE_CONNECTION=sync
+          GA_MEASUREMENT_ID=${{ secrets.GA_MEASUREMENT_ID }}
+          GOOGLE_SITE_VERIFICATION=${{ secrets.GOOGLE_SITE_VERIFICATION }}
+          EOF
+
+      - name: Deploy app via rsync over SSH
+        uses: burnett01/rsync-deployments@7.0.1
+        with:
+          switches: -avzr --delete --exclude=".git" --exclude=".github" --exclude="node_modules" --exclude="tests" --exclude="database/database.sqlite" --exclude="storage/app" --exclude="storage/logs" --exclude="storage/framework" --exclude="scripts/.kyodo-cache"
+          path: ./
+          remote_path: /home/xs501620/47meshi.net/app/
+          remote_host: ${{ secrets.SSH_HOST }}
+          remote_port: '10022'
+          remote_user: ${{ secrets.SSH_USERNAME }}
+          remote_key: ${{ secrets.SSH_PRIVATE_KEY }}
+
+      # public_html を app/public へのリンクにし、取り込みまで実行する。
+      # public_html が実体のディレクトリだった場合は、中に別のものが
+      # 入っている可能性があるので、消さずに中断する。
+      - name: Link public_html, migrate and seed
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          port: 10022
+          username: ${{ secrets.SSH_USERNAME }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          command_timeout: 20m
+          script: |
+            set -e
+            cd /home/xs501620/47meshi.net
+            mkdir -p app/database app/storage/framework/cache app/storage/framework/sessions app/storage/framework/views app/storage/logs app/storage/app
+            touch app/database/database.sqlite
+            chmod -R 775 app/storage app/database
+
+            if [ -e public_html ] && [ ! -L public_html ]; then
+              echo "public_html がシンボリックリンクではありません。中身を消す恐れがあるため中断します。" >&2
+              ls -la public_html | head -20 >&2
+              exit 1
+            fi
+
+            if [ ! -L public_html ]; then
+              ln -s app/public public_html
+            fi
+
+            cd app
+            PHP=$(command -v php8.3 || command -v php || echo /opt/php-8.3.30/bin/php)
+            echo "php: $PHP ($($PHP -v | head -1))"
+            $PHP artisan config:clear
+            $PHP artisan route:clear
+            $PHP artisan view:clear
+            $PHP artisan cache:clear
+            $PHP artisan migrate --force
+            $PHP -d memory_limit=512M artisan db:seed --class=DishSeeder --force
+            echo "--- 取り込み後の件数 ---"
+            $PHP artisan tinker --execute="echo \App\Models\Dish::count();"
