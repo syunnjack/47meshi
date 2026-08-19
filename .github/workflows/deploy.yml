@@ -67,7 +67,9 @@ jobs:
           script: |
             set -ex
             cd /home/xs501620/47meshi.net
-            mkdir -p app/database app/storage/framework/cache app/storage/framework/sessions app/storage/framework/views app/storage/logs app/storage/app
+            # cache ストアが file なので data まで作る。これが無いと
+            # artisan cache:clear が「Failed to clear cache」で落ちる。
+            mkdir -p app/database app/storage/framework/cache/data app/storage/framework/sessions app/storage/framework/views app/storage/logs app/storage/app
             touch app/database/database.sqlite
             chmod -R 775 app/storage app/database
 
